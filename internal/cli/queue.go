@@ -10,7 +10,6 @@ import (
 	"github.com/geodro/lerd/internal/envfile"
 	phpDet "github.com/geodro/lerd/internal/php"
 	"github.com/geodro/lerd/internal/podman"
-	lerdSystemd "github.com/geodro/lerd/internal/systemd"
 	"github.com/spf13/cobra"
 )
 
@@ -137,53 +136,34 @@ func queueStartExplicit(siteName, sitePath, phpVersion, queue string, tries, tim
 		}
 	}
 
-	versionShort := strings.ReplaceAll(phpVersion, ".", "")
-	fpmUnit := "lerd-php" + versionShort + "-fpm"
-	container := "lerd-php" + versionShort + "-fpm"
-	unitName := "lerd-queue-" + siteName
-
-	artisanArgs := fmt.Sprintf("queue:work --queue=%s --tries=%d --timeout=%d", queue, tries, timeout)
-
-	unit := fmt.Sprintf(`[Unit]
-Description=Lerd Queue Worker (%s)
-After=network.target %s.service
-BindsTo=%s.service
-
-[Service]
-Type=simple
-Restart=always
-RestartSec=5
-ExecStart=podman exec -w %s %s php artisan %s
-
-[Install]
-WantedBy=default.target
-`, siteName, fpmUnit, fpmUnit, sitePath, container, artisanArgs)
-
-	changed, err := lerdSystemd.WriteServiceIfChanged(unitName, unit)
-	if err != nil {
-		return fmt.Errorf("writing service unit: %w", err)
+	fw, ok := config.GetFramework(siteFrameworkName(siteName))
+	if !ok {
+		return fmt.Errorf("no framework found for site %q", siteName)
 	}
-	if changed {
-		if err := podman.DaemonReload(); err != nil {
-			return fmt.Errorf("daemon-reload: %w", err)
-		}
-		if err := lerdSystemd.EnableService(unitName); err != nil {
-			fmt.Printf("[WARN] enable: %v\n", err)
-		}
+	worker, ok := fw.Workers["queue"]
+	if !ok {
+		return fmt.Errorf("framework %q has no worker named \"queue\"", fw.Label)
 	}
 
-	if err := lerdSystemd.StartService(unitName); err != nil {
-		return fmt.Errorf("starting queue worker: %w", err)
-	}
+	// Build the command with custom flags if they differ from defaults.
+	workerCopy := worker
+	workerCopy.Command = fmt.Sprintf("php artisan queue:work --queue=%s --tries=%d --timeout=%d", queue, tries, timeout)
 
-	fmt.Printf("Queue worker started for %s (queue: %s)\n", siteName, queue)
-	fmt.Printf("  Logs: journalctl --user -u %s -f\n", unitName)
-	return nil
+	return WorkerStartForSite(siteName, sitePath, phpVersion, "queue", workerCopy)
 }
 
-// QueueStartForSite starts a queue worker for the given site with default settings.
+// QueueStartForSite starts a queue worker for the given site using the command
+// from the framework definition.
 func QueueStartForSite(siteName, sitePath, phpVersion string) error {
-	return queueStartExplicit(siteName, sitePath, phpVersion, "default", 3, 60)
+	fw, ok := config.GetFramework(siteFrameworkName(siteName))
+	if !ok {
+		return fmt.Errorf("no framework found for site %q", siteName)
+	}
+	worker, ok := fw.Workers["queue"]
+	if !ok {
+		return fmt.Errorf("framework %q has no worker named \"queue\"", fw.Label)
+	}
+	return WorkerStartForSite(siteName, sitePath, phpVersion, "queue", worker)
 }
 
 // QueueRestartForSite signals the Laravel queue worker to gracefully restart by
@@ -228,21 +208,5 @@ func QueueRestartForSite(siteName, sitePath, phpVersion string) error {
 
 // QueueStopForSite stops and removes the queue worker for the named site.
 func QueueStopForSite(siteName string) error {
-	unitName := "lerd-queue-" + siteName
-	unitFile := filepath.Join(config.SystemdUserDir(), unitName+".service")
-
-	// Stop and disable — ignore errors if already stopped.
-	_ = lerdSystemd.DisableService(unitName)
-	podman.StopUnit(unitName) //nolint:errcheck
-
-	if err := os.Remove(unitFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing unit file: %w", err)
-	}
-
-	if err := podman.DaemonReload(); err != nil {
-		fmt.Printf("[WARN] daemon-reload: %v\n", err)
-	}
-
-	fmt.Printf("Queue worker stopped for %s\n", siteName)
-	return nil
+	return WorkerStopForSite(siteName, "queue")
 }

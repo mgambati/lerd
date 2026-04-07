@@ -632,7 +632,6 @@ func reverbEnvUpdates(envMap map[string]string, domain string, secured bool, sit
 	return updates
 }
 
-
 const alphanumChars = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 func randAlphanumeric(n int) string {
